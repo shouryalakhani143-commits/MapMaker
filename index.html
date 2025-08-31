@@ -2,22 +2,143 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>DPS Sharjah Bin Map</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <title>Sharjah Auto Route – Smart Bins</title>
+
+  <!-- Leaflet & Routing styles -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css"/>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet-routing-machine/3.2.12/leaflet-routing-machine.css"/>
+
   <style>
     html, body, #map { height: 100%; margin: 0; }
+    .panel {
+      position: absolute; z-index: 1000; left: 10px; top: 10px;
+      background: #fff; border-radius: 10px; padding: 10px 12px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.18); font: 14px/1.25 system-ui, Arial;
+      width: 260px;
+    }
+    .panel h3 { margin: 0 0 8px; font-size: 16px; }
+    .panel label { display: block; margin: 8px 0 4px; font-weight: 600; }
+    .panel input[type="number"] { width: 90px; }
+    .panel button {
+      margin-top: 8px; padding: 7px 10px; border-radius: 8px; border: 1px solid #e5e7eb;
+      background: #2563eb; color: #fff; cursor: pointer;
+    }
+    .tag { display:inline-block; padding:2px 6px; border-radius:6px; font-size:12px; background:#eef2ff; color:#3730a3; margin-left:6px; }
   </style>
 </head>
 <body>
   <div id="map"></div>
-  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+  <!-- Controls -->
+  <div class="panel" id="ui">
+    <h3>Auto Route Options</h3>
+    <div><b>Start:</b> Sharjah Municipality <span class="tag">Depot</span></div>
+    <label for="minFill">Min fill % to include</label>
+    <input id="minFill" type="number" min="0" max="100" value="40">
+    <button id="buildBtn">Build Route</button>
+  </div>
+
+  <!-- Leaflet & Routing scripts -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-routing-machine/3.2.12/leaflet-routing-machine.min.js"></script>
+
   <script>
-    const map = L.map('map').setView([25.2935, 55.4518], 16);
+    // ===== 1) LOCATIONS =====
+    // Sharjah Municipality HQ (route starts here)
+    // DMS 25°21'25"N 55°24'05"E -> ~25.35694, 55.40139
+    const DEPOT = { name: 'Sharjah Municipality HQ', lat: 25.35694, lng: 55.40139 };
+
+    // Your Arduino bin at DPS Sharjah (exact bin on campus)
+    const DPS_BIN = { name: 'Arduino Bin @ DPS Sharjah', lat: 25.2935, lng: 55.4518, fill: 78, isArduino: true };
+
+    // Two nearby bins (examples near DPS; adjust later if you want)
+    const BINS = [
+      DPS_BIN,
+      { name: 'Bin – Parking NW (near DPS)',  lat: 25.2950, lng: 55.4550, fill: 65 },
+      { name: 'Bin – Sports Ground side',     lat: 25.2920, lng: 55.4495, fill: 52 }
+    ];
+
+    // ===== 2) MAP =====
+    // Center roughly between depot and bins
+    const map = L.map('map').setView([25.33, 55.43], 12);
+
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
-    L.marker([25.2935, 55.4518]).addTo(map)
-      .bindPopup('Smart Bin @ DPS Sharjah').openPopup();
+
+    // Mark the depot
+    L.marker([DEPOT.lat, DEPOT.lng], { title: DEPOT.name })
+      .addTo(map)
+      .bindPopup(`<b>${DEPOT.name}</b><br>Route origin (depot).`);
+
+    // Show all bin markers
+    BINS.forEach(b => {
+      const label = b.isArduino ? `${b.name} <span class="tag">Arduino</span>` : b.name;
+      L.marker([b.lat, b.lng], { title: b.name })
+        .addTo(map)
+        .bindPopup(`<b>${label}</b><br>Fill: ${b.fill}%`);
+    });
+
+    // ===== 3) ROUTING LOGIC =====
+    // OSRM demo server router
+    let routingControl = null;
+
+    function buildRoute() {
+      const minFill = Number(document.getElementById('minFill').value) || 0;
+
+      // Filter bins by threshold and sort DESC by fill
+      const targets = BINS
+        .filter(b => typeof b.fill === 'number' && b.fill >= minFill)
+        .sort((a, b) => b.fill - a.fill);
+
+      // If nothing passes, bail
+      if (targets.length === 0) {
+        alert('No bins meet the minimum fill threshold.');
+        return;
+      }
+
+      // Remove previous route if any
+      if (routingControl) {
+        map.removeControl(routingControl);
+        routingControl = null;
+      }
+
+      // Build waypoints: Depot first, then bins by fill %
+      const waypoints = [
+        L.latLng(DEPOT.lat, DEPOT.lng),
+        ...targets.map(b => L.latLng(b.lat, b.lng))
+      ];
+
+      routingControl = L.Routing.control({
+        waypoints,
+        router: L.Routing.osrmv1({
+          serviceUrl: 'https://router.project-osrm.org/route/v1'
+        }),
+        addWaypoints: false,
+        draggableWaypoints: false,
+        fitSelectedRoutes: true,
+        routeWhileDragging: false,
+        show: false,
+        lineOptions: { addWaypoints: false },
+        createMarker: function(i, wp) {
+          if (i === 0) {
+            return L.marker(wp.latLng).bindPopup(`<b>${DEPOT.name}</b><br>Start`);
+          }
+          const bin = targets[i - 1];
+          const ar = bin.isArduino ? ' <span class="tag">Arduino</span>' : '';
+          return L.marker(wp.latLng).bindPopup(`<b>${bin.name}${ar}</b><br>Fill: ${bin.fill}%`);
+        }
+      }).addTo(map);
+    }
+
+    // Hook UI
+    document.getElementById('buildBtn').addEventListener('click', buildRoute);
+    // Build once at load
+    buildRoute();
+
+    // Improve UX: don’t drag map when using panel
+    const panel = document.getElementById('ui');
+    L.DomEvent.disableClickPropagation(panel);
   </script>
 </body>
 </html>
