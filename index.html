@@ -24,6 +24,8 @@
       background: #2563eb; color: #fff; cursor: pointer;
     }
     .tag { display:inline-block; padding:2px 6px; border-radius:6px; font-size:12px; background:#eef2ff; color:#3730a3; margin-left:6px; }
+    /* Move LRM itinerary box to bottom-left so it doesn’t overlap the control panel */
+    .leaflet-routing-container { max-height: 35%; overflow: auto; }
   </style>
 </head>
 <body>
@@ -44,14 +46,10 @@
 
   <script>
     // ===== 1) LOCATIONS =====
-    // Sharjah Municipality HQ (route starts here)
-    // DMS 25°21'25"N 55°24'05"E -> ~25.35694, 55.40139
     const DEPOT = { name: 'Sharjah Municipality HQ', lat: 25.35694, lng: 55.40139 };
 
-    // Your Arduino bin at DPS Sharjah (exact bin on campus)
     const DPS_BIN = { name: 'Arduino Bin @ DPS Sharjah', lat: 25.2935, lng: 55.4518, fill: 78, isArduino: true };
 
-    // Two nearby bins (examples near DPS; adjust later if you want)
     const BINS = [
       DPS_BIN,
       { name: 'Bin – Parking NW (near DPS)',  lat: 25.2950, lng: 55.4550, fill: 65 },
@@ -59,19 +57,16 @@
     ];
 
     // ===== 2) MAP =====
-    // Center roughly between depot and bins
     const map = L.map('map').setView([25.33, 55.43], 12);
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
 
-    // Mark the depot
     L.marker([DEPOT.lat, DEPOT.lng], { title: DEPOT.name })
       .addTo(map)
       .bindPopup(`<b>${DEPOT.name}</b><br>Route origin (depot).`);
 
-    // Show all bin markers
     BINS.forEach(b => {
       const label = b.isArduino ? `${b.name} <span class="tag">Arduino</span>` : b.name;
       L.marker([b.lat, b.lng], { title: b.name })
@@ -79,31 +74,36 @@
         .bindPopup(`<b>${label}</b><br>Fill: ${b.fill}%`);
     });
 
-    // ===== 3) ROUTING LOGIC =====
-    // OSRM demo server router
+    // ===== 3) ROUTING (with fallback) =====
     let routingControl = null;
 
-    function buildRoute() {
+    function makeRouter(serviceUrl) {
+      return L.Routing.osrmv1({ serviceUrl });
+    }
+
+    // Primary OSRM and a fallback OSRM
+    const ROUTERS = [
+      'https://router.project-osrm.org/route/v1',
+      'https://routing.openstreetmap.de/routed-car/route/v1'
+    ];
+
+    function buildRoute(routerIndex = 0) {
       const minFill = Number(document.getElementById('minFill').value) || 0;
 
-      // Filter bins by threshold and sort DESC by fill
       const targets = BINS
         .filter(b => typeof b.fill === 'number' && b.fill >= minFill)
         .sort((a, b) => b.fill - a.fill);
 
-      // If nothing passes, bail
       if (targets.length === 0) {
         alert('No bins meet the minimum fill threshold.');
         return;
       }
 
-      // Remove previous route if any
       if (routingControl) {
         map.removeControl(routingControl);
         routingControl = null;
       }
 
-      // Build waypoints: Depot first, then bins by fill %
       const waypoints = [
         L.latLng(DEPOT.lat, DEPOT.lng),
         ...targets.map(b => L.latLng(b.lat, b.lng))
@@ -111,34 +111,40 @@
 
       routingControl = L.Routing.control({
         waypoints,
-        router: L.Routing.osrmv1({
-          serviceUrl: 'https://router.project-osrm.org/route/v1'
-        }),
+        router: makeRouter(ROUTERS[routerIndex]),
         addWaypoints: false,
         draggableWaypoints: false,
         fitSelectedRoutes: true,
         routeWhileDragging: false,
-        show: false,
+        show: true,   // show itinerary so you can see response
         lineOptions: { addWaypoints: false },
         createMarker: function(i, wp) {
-          if (i === 0) {
-            return L.marker(wp.latLng).bindPopup(`<b>${DEPOT.name}</b><br>Start`);
-          }
+          if (i === 0) return L.marker(wp.latLng).bindPopup(`<b>${DEPOT.name}</b><br>Start`);
           const bin = targets[i - 1];
           const ar = bin.isArduino ? ' <span class="tag">Arduino</span>' : '';
           return L.marker(wp.latLng).bindPopup(`<b>${bin.name}${ar}</b><br>Fill: ${bin.fill}%`);
         }
-      }).addTo(map);
+      })
+      .on('routingerror', function() {
+        // Try fallback if available
+        if (routerIndex + 1 < ROUTERS.length) {
+          console.warn('Primary router failed, trying fallback…');
+          buildRoute(routerIndex + 1);
+        } else {
+          alert('Routing server is busy or blocked. Try again in a minute.');
+          console.error('All routers failed');
+        }
+      })
+      .addTo(map);
     }
 
-    // Hook UI
-    document.getElementById('buildBtn').addEventListener('click', buildRoute);
-    // Build once at load
-    buildRoute();
+    document.getElementById('buildBtn').addEventListener('click', () => buildRoute(0));
 
-    // Improve UX: don’t drag map when using panel
-    const panel = document.getElementById('ui');
-    L.DomEvent.disableClickPropagation(panel);
+    // Build on load
+    buildRoute(0);
+
+    // Don’t drag map when using the panel
+    L.DomEvent.disableClickPropagation(document.getElementById('ui'));
   </script>
 </body>
 </html>
