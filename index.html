@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Sharjah Auto Route – Smart Bins</title>
+  <title>Sharjah Auto Route – Smart Bins (Firestore)</title>
 
   <!-- Leaflet & Routing styles -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css"/>
@@ -24,7 +24,6 @@
       background: #2563eb; color: #fff; cursor: pointer;
     }
     .tag { display:inline-block; padding:2px 6px; border-radius:6px; font-size:12px; background:#eef2ff; color:#3730a3; margin-left:6px; }
-    /* Move LRM itinerary box to bottom-left so it doesn’t overlap the control panel */
     .leaflet-routing-container { max-height: 35%; overflow: auto; }
   </style>
 </head>
@@ -38,63 +37,92 @@
     <label for="minFill">Min fill % to include</label>
     <input id="minFill" type="number" min="0" max="100" value="40">
     <button id="buildBtn">Build Route</button>
+    <div id="status" style="margin-top:8px;color:#6b7280;font-size:12px;"></div>
   </div>
 
   <!-- Leaflet & Routing scripts -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-routing-machine/3.2.12/leaflet-routing-machine.min.js"></script>
 
-  <script>
-    // ===== 1) LOCATIONS =====
+  <!-- Firebase (modular v9) -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+    import { getFirestore, collection, getDocs, query, orderBy } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore.js";
+
+    // ===== 1) FIREBASE CONFIG — replace with your own from Firebase Console > Project Settings > Your Web App
+    const firebaseConfig = {
+      apiKey: "AIzaSyCa__qGv-VmW5etGt1QRC5McJqxE_xoWa0",
+      authDomain: "bingenius-5bf69.firebaseapp.com",
+      projectId: "bingenius-5bf69",
+    };
+
+    // ===== 2) INIT FIREBASE & DB
+    const app = initializeApp(firebaseConfig);
+    const db  = getFirestore(app);
+
+    // ===== 3) MAP
     const DEPOT = { name: 'Sharjah Municipality HQ', lat: 25.35694, lng: 55.40139 };
 
-    const DPS_BIN = { name: 'Arduino Bin @ DPS Sharjah', lat: 25.2935, lng: 55.4518, fill: 78, isArduino: true };
-
-    const BINS = [
-      DPS_BIN,
-      { name: 'Bin – Parking NW (near DPS)',  lat: 25.2950, lng: 55.4550, fill: 65 },
-      { name: 'Bin – Sports Ground side',     lat: 25.2920, lng: 55.4495, fill: 52 }
-    ];
-
-    // ===== 2) MAP =====
     const map = L.map('map').setView([25.33, 55.43], 12);
-
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; OpenStreetMap contributors'
-    }).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
 
     L.marker([DEPOT.lat, DEPOT.lng], { title: DEPOT.name })
       .addTo(map)
       .bindPopup(`<b>${DEPOT.name}</b><br>Route origin (depot).`);
 
-    BINS.forEach(b => {
-      const label = b.isArduino ? `${b.name} <span class="tag">Arduino</span>` : b.name;
-      L.marker([b.lat, b.lng], { title: b.name })
-        .addTo(map)
-        .bindPopup(`<b>${label}</b><br>Fill: ${b.fill}%`);
-    });
-
-    // ===== 3) ROUTING (with fallback) =====
     let routingControl = null;
+    const status = document.getElementById('status');
 
     function makeRouter(serviceUrl) {
       return L.Routing.osrmv1({ serviceUrl });
     }
-
-    // Primary OSRM and a fallback OSRM
     const ROUTERS = [
       'https://router.project-osrm.org/route/v1',
       'https://routing.openstreetmap.de/routed-car/route/v1'
     ];
 
-    function buildRoute(routerIndex = 0) {
+    async function fetchBins() {
+      status.textContent = 'Loading bins from Firestore…';
+      const binsCol = collection(db, 'bins');
+      // order by fill desc so markers render in that order (not required)
+      const q = query(binsCol, orderBy('fill', 'desc'));
+      const snap = await getDocs(q);
+      const bins = [];
+      snap.forEach(doc => {
+        const d = doc.data();
+        if (typeof d.lat === 'number' && typeof d.lng === 'number') {
+          bins.push({
+            id: doc.id,
+            name: d.name ?? 'Bin',
+            lat: d.lat,
+            lng: d.lng,
+            fill: typeof d.fill === 'number' ? d.fill : 0,
+            isArduino: !!d.isArduino
+          });
+        }
+      });
+      status.textContent = `Loaded ${bins.length} bin(s).`;
+      return bins;
+    }
+
+    function showMarkers(bins) {
+      bins.forEach(b => {
+        const label = b.isArduino ? `${b.name} <span class="tag">Arduino</span>` : b.name;
+        L.marker([b.lat, b.lng], { title: b.name })
+          .addTo(map)
+          .bindPopup(`<b>${label}</b><br>Fill: ${b.fill}%`);
+      });
+    }
+
+    function buildRouteFrom(bins, routerIndex = 0) {
       const minFill = Number(document.getElementById('minFill').value) || 0;
 
-      const targets = BINS
-        .filter(b => typeof b.fill === 'number' && b.fill >= minFill)
-        .sort((a, b) => b.fill - a.fill);
+      const targets = bins
+        .filter(b => b.fill >= minFill)
+        .sort((a, b) => b.fill - a.fill); // fullest first
 
       if (targets.length === 0) {
+        status.textContent = 'No bins meet the minimum fill threshold.';
         alert('No bins meet the minimum fill threshold.');
         return;
       }
@@ -109,6 +137,7 @@
         ...targets.map(b => L.latLng(b.lat, b.lng))
       ];
 
+      status.textContent = 'Requesting route…';
       routingControl = L.Routing.control({
         waypoints,
         router: makeRouter(ROUTERS[routerIndex]),
@@ -116,7 +145,7 @@
         draggableWaypoints: false,
         fitSelectedRoutes: true,
         routeWhileDragging: false,
-        show: true,   // show itinerary so you can see response
+        show: true,
         lineOptions: { addWaypoints: false },
         createMarker: function(i, wp) {
           if (i === 0) return L.marker(wp.latLng).bindPopup(`<b>${DEPOT.name}</b><br>Start`);
@@ -125,23 +154,26 @@
           return L.marker(wp.latLng).bindPopup(`<b>${bin.name}${ar}</b><br>Fill: ${bin.fill}%`);
         }
       })
-      .on('routingerror', function() {
-        // Try fallback if available
+      .on('routesfound', () => { status.textContent = 'Route ready.'; })
+      .on('routingerror', () => {
         if (routerIndex + 1 < ROUTERS.length) {
-          console.warn('Primary router failed, trying fallback…');
-          buildRoute(routerIndex + 1);
+          status.textContent = 'Primary router busy—trying fallback…';
+          buildRouteFrom(bins, routerIndex + 1);
         } else {
+          status.textContent = 'Routing servers busy or blocked. Try again.';
           alert('Routing server is busy or blocked. Try again in a minute.');
-          console.error('All routers failed');
         }
       })
       .addTo(map);
     }
 
-    document.getElementById('buildBtn').addEventListener('click', () => buildRoute(0));
+    // Load bins, show markers, build route
+    const allBins = await fetchBins();
+    showMarkers(allBins);
 
-    // Build on load
-    buildRoute(0);
+    document.getElementById('buildBtn').addEventListener('click', () => buildRouteFrom(allBins, 0));
+    // Build once on load
+    buildRouteFrom(allBins, 0);
 
     // Don’t drag map when using the panel
     L.DomEvent.disableClickPropagation(document.getElementById('ui'));
